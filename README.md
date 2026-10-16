@@ -2,7 +2,7 @@
 
 The U.S. Department of Treasury's Fiscal Data API. Daily Treasury cash, public debt outstanding, federal receipts and outlays, customs revenue, exchange rates, and savings bonds redemption data. The actual numbers behind "the federal deficit" and "the national debt." Free, no auth.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1684+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1819+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 ## Why this matters for AI agents
 
@@ -14,6 +14,7 @@ Common flows:
 - **Customs revenue.** "How much tariff revenue did Treasury collect in 2024?" → `treasury_customs_revenue({year: 2024})`.
 - **Receipts / outlays.** Daily Treasury cash position (deposits vs. withdrawals) by source.
 - **Exchange rates.** Treasury reporting rate for foreign-currency transactions (used by federal contractors and grant recipients).
+- **Auction results.** "What was the high yield at the last 10-year note auction?" → `treasury_auction_results({security_type: "Note", term: "10-Year"})` → high yield, bid-to-cover ratio, CUSIP, offering/accepted amounts for the most recent settled auction. Covers bills, notes, bonds, TIPS, and floating-rate notes (FRNs).
 
 Used by the `trade_bilateral_analysis` compound for tariff context.
 
@@ -31,6 +32,7 @@ None. Treasury Fiscal Data is fully public, free, no key.
 | Customs Revenue | Monthly | Tariff collections |
 | Treasury Reporting Rates of Exchange | Quarterly | Official rates for federal accounting |
 | Savings Bond Securities | Monthly | Issuance, redemption |
+| Auctions | Per auction (daily-ish) | High yield/rate, bid-to-cover, CUSIP for bills/notes/bonds/TIPS/FRNs |
 
 ## Update cadence
 
@@ -48,6 +50,9 @@ Pipeworx caches with TTLs matching these.
 - **Treasury exchange rates aren't market rates.** They're quarterly-recalibrated rates used for federal accounting. For real-time FX, use the dedicated `exchange-rate` or `frankfurter` packs.
 - **Daily cash position is not GDP.** The Treasury's cash position is a stock measure; GDP is a flow. Don't confuse.
 - **Fiscal year vs. calendar year.** Federal fiscal year is October 1 – September 30. Receipts and outlays default to fiscal-year reporting. Filter explicitly if you need calendar-year numbers.
+- **Auctions are often reopenings, not new issues.** Treasury reopens an existing note/bond CUSIP at a shorter remaining maturity (e.g. a "10-year note" auctioned 2 months after issuance shows up as a "9-Year 10-Month" term). `treasury_auction_results`'s `term` filter matches the security's ORIGINAL nominal term (`original_term` in the response) so "10-Year" still finds it — use `term`/`original_term` in the response to tell a fresh issue from a reopening.
+- **TIPS and FRNs aren't their own `security_type` in the source data.** Treasury files them under `Note`/`Bond` with an inflation-indexed or floating-rate flag. Pass `security_type: "TIPS"` or `"FRN"` and the tool resolves this for you; the raw API's own `security_type:eq:TIPS` filter returns zero rows.
+- **Bills report a rate, not a yield.** `high_yield_pct` is null for bills — use `high_investment_rate_pct` (the bond-equivalent yield) or `high_discount_rate_pct` (the discount rate actually bid).
 
 ## Quick Start
 
@@ -93,7 +98,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1684+ data sources. The
+Both URLs reach the same gateway and the same 1819+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 

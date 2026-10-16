@@ -678,6 +678,10 @@ function collapse(s: string): string {
  * - treasury_receipts: total government receipts by source
  * - treasury_debt: national debt (debt to the penny)
  * - treasury_exchange_rates: Treasury exchange rates by country
+ * - treasury_avg_interest_rates: average rates by security type
+ * - treasury_federal_net_cost: federal net cost by agency
+ * - treasury_auction_results: auction high yield/rate, bid-to-cover, amounts
+ *   for bills/notes/bonds/TIPS/FRNs (auctions_query dataset)
  */
 
 
@@ -783,6 +787,26 @@ const tools: McpToolExport['tools'] = [
         fiscal_year: { type: 'string', description: 'Four-digit fiscal year to filter by (e.g., "2024"). Omit for most recent.' },
         limit: { type: 'number', description: 'Number of records to return (default 20)' },
       },
+    },
+  },
+  {
+    name: 'treasury_auction_results',
+    description:
+      'US Treasury auction results: high yield/rate, bid-to-cover ratio, and offering/accepted amounts for recently settled bills, notes, bonds, TIPS, and floating-rate notes (FRNs), with CUSIP, from the Treasury Fiscal Data auctions dataset. A reopening (e.g. a "9-Year 10-Month" auction reopening an original 10-year note) is matched by its ORIGINAL nominal term, so term:"10-Year" finds both new 10-year note auctions and reopenings of one. Only settled auctions (with a published rate) are returned; upcoming announced-but-unsettled auctions are excluded.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        security_type: {
+          type: 'string',
+          description: 'Security category: "Bill", "Note", "Bond", "TIPS", or "FRN" (floating-rate note). Omit for the most recent settled auctions across all types.',
+        },
+        term: {
+          type: 'string',
+          description: 'Original nominal term, e.g. "4-Week", "13-Week", "26-Week", "52-Week" (bills); "2-Year", "3-Year", "5-Year", "7-Year", "10-Year" (notes); "20-Year", "30-Year" (bonds/TIPS). Matched against the security\'s ORIGINAL term, so it still finds reopenings labeled with a shorter remaining term. Omit for all terms.',
+        },
+        limit: { type: 'number', description: 'Number of auctions to return (default 10, max 50)' },
+      },
+      required: [],
     },
   },
 ];
@@ -1120,6 +1144,136 @@ async function getFederalNetCost(fiscalYear?: string, limit: number = 20, supa: 
   };
 }
 
+// Category -> live-side filter (an optimization; the same classification is
+// re-applied client-side below so a mirror-served snapshot, which holds all
+// categories mixed, filters correctly too).
+//   - Bill: security_type == Bill.
+//   - Note / Bond: security_type == Note/Bond AND NOT a TIPS or FRN (Treasury
+//     files TIPS/FRN auctions under security_type Note or Bond, distinguished
+//     only by the inflation_index_security / floating_rate flags — verified
+//     live 2026-10-16, filter security_type:eq:TIPS returns 0 rows).
+//   - TIPS: inflation_index_security == Yes (security_type is Note OR Bond).
+//   - FRN: floating_rate == Yes (security_type is Note).
+const AUCTION_CATEGORY_ALIASES: Record<string, 'bill' | 'note' | 'bond' | 'tips' | 'frn'> = {
+  bill: 'bill', bills: 'bill', 't-bill': 'bill', 'treasury bill': 'bill',
+  note: 'note', notes: 'note', 't-note': 'note',
+  bond: 'bond', bonds: 'bond', 't-bond': 'bond',
+  tips: 'tips', tip: 'tips', 'treasury inflation-protected securities': 'tips',
+  frn: 'frn', frns: 'frn', 'floating rate note': 'frn', 'floating-rate note': 'frn',
+};
+
+function auctionCategory(raw: string): 'bill' | 'note' | 'bond' | 'tips' | 'frn' {
+  const key = raw.trim().toLowerCase();
+  const found = AUCTION_CATEGORY_ALIASES[key];
+  if (!found) {
+    throw new Error(
+      `user_error: Unrecognized security_type "${raw}". Use one of: Bill, Note, Bond, TIPS, FRN (or omit for all types).`,
+    );
+  }
+  return found;
+}
+
+function rowCategory(r: Record<string, unknown>): 'bill' | 'note' | 'bond' | 'tips' | 'frn' {
+  if (r.floating_rate === 'Yes') return 'frn';
+  if (r.inflation_index_security === 'Yes') return 'tips';
+  if (r.security_type === 'Bill') return 'bill';
+  if (r.security_type === 'Bond') return 'bond';
+  return 'note';
+}
+
+const hasVal = (v: unknown): boolean => v != null && v !== 'null' && v !== '';
+
+// Settled = Treasury has published a rate. Upcoming announced auctions carry
+// the row (CUSIP, offering amount, dates) with every rate field null.
+function isSettledAuction(r: Record<string, unknown>): boolean {
+  return hasVal(r.high_yield) || hasVal(r.high_investment_rate) || hasVal(r.high_discnt_margin);
+}
+
+function normalizeTerm(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+async function getAuctionResults(
+  securityTypeRaw: string | undefined,
+  termRaw: string | undefined,
+  limitRaw: number | undefined,
+  supa: Supa,
+) {
+  const limit = Math.min(Math.max(Number(limitRaw) || 10, 1), 50);
+  const category = securityTypeRaw ? auctionCategory(securityTypeRaw) : null;
+  const term = termRaw ? normalizeTerm(termRaw) : null;
+
+  const filterParts: string[] = [];
+  if (category === 'bill') filterParts.push('security_type:eq:Bill');
+  else if (category === 'bond') filterParts.push('security_type:eq:Bond', 'inflation_index_security:eq:No');
+  else if (category === 'note') filterParts.push('security_type:eq:Note', 'inflation_index_security:eq:No', 'floating_rate:eq:No');
+  else if (category === 'tips') filterParts.push('inflation_index_security:eq:Yes');
+  else if (category === 'frn') filterParts.push('floating_rate:eq:Yes');
+
+  const { response, mirror_fetched_at } = await liveOrMirror('auctions', 'v1/accounting/od/auctions_query', {
+    ...(filterParts.length ? { filter: filterParts.join(',') } : {}),
+    'sort': '-auction_date',
+    'page[size]': '300',
+  }, supa);
+
+  // Re-apply category + term client-side: a no-op when the live filter already
+  // did it, and the step that does the real work on the fallback path, whose
+  // snapshot carries all security types unfiltered.
+  const matches = response.data.filter((r) => {
+    if (category && rowCategory(r) !== category) return false;
+    if (term) {
+      const original = String(r.original_security_term ?? '').toLowerCase();
+      const current = String(r.security_term ?? '').toLowerCase();
+      if (original !== term && current !== term) return false;
+    }
+    return isSettledAuction(r);
+  });
+
+  const rows = matches.slice(0, limit);
+
+  if (rows.length === 0) {
+    return {
+      found: false,
+      reason: 'no_match',
+      security_type: securityTypeRaw ?? null,
+      term: termRaw ?? null,
+      hint: 'No settled Treasury auction matched this security_type/term combination. security_type is one of Bill/Note/Bond/TIPS/FRN; term is the ORIGINAL nominal term (e.g. "10-Year", "26-Week") — try omitting one filter to broaden the search.',
+    };
+  }
+
+  return {
+    found: true,
+    description:
+      'US Treasury auction results' +
+      (securityTypeRaw ? ` — ${securityTypeRaw}` : '') +
+      (termRaw ? ` (${termRaw})` : ''),
+    security_type_filter: securityTypeRaw ?? null,
+    term_filter: termRaw ?? null,
+    count: rows.length,
+    source: 'U.S. Department of the Treasury, Fiscal Data — Auctions dataset',
+    ...(mirror_fetched_at ? mirrorMeta(mirror_fetched_at) : {}),
+    records: rows.map((r) => ({
+      auction_date: r.auction_date,
+      issue_date: r.issue_date,
+      maturity_date: r.maturity_date,
+      cusip: r.cusip,
+      security_type: r.security_type,
+      term: r.security_term,
+      original_term: r.original_security_term,
+      reopening: r.reopening === 'Yes',
+      is_tips: r.inflation_index_security === 'Yes',
+      is_frn: r.floating_rate === 'Yes',
+      high_yield_pct: num(r.high_yield),
+      high_discount_rate_pct: num(r.high_discnt_rate),
+      high_investment_rate_pct: num(r.high_investment_rate),
+      high_discount_margin_pct: num(r.high_discnt_margin),
+      bid_to_cover_ratio: num(r.bid_to_cover_ratio),
+      offering_amount: num(r.offering_amt),
+      total_accepted: num(r.total_accepted),
+    })),
+  };
+}
+
 async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
   const supa = supaFromArgs(args); // injected by the gateway (injectSupabase)
   switch (name) {
@@ -1135,6 +1289,13 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
       return getAvgInterestRates((args.limit as number) || 12, supa);
     case 'treasury_federal_net_cost':
       return getFederalNetCost(args.fiscal_year as string | undefined, (args.limit as number) || 20, supa);
+    case 'treasury_auction_results':
+      return getAuctionResults(
+        args.security_type as string | undefined,
+        args.term as string | undefined,
+        args.limit as number | undefined,
+        supa,
+      );
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-treasury-fiscal",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Treasury Fiscal MCP — US Treasury Fiscal Data API",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-4ba62c3d228d1c6caa80051cce50d5c93be444949ee60f9a20937712b2f8dfaf",
-    "sourceCommit": "66a0692f029179984440cef6938cba7fdd41d66d"
+    "sourceHash": "v1-19f7a809f380a83f5b268c8b1fc97358029418b017a2607b35622c2d5dbd73aa",
+    "sourceCommit": "a03f96ed672b8c149593c64ecbf30280cabf084c"
   }
 }
