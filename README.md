@@ -2,7 +2,7 @@
 
 The U.S. Department of Treasury's Fiscal Data API. Daily Treasury cash, public debt outstanding, federal receipts and outlays, customs revenue, exchange rates, and savings bonds redemption data. The actual numbers behind "the federal deficit" and "the national debt." Free, no auth.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1819+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1857+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 ## Why this matters for AI agents
 
@@ -13,6 +13,7 @@ Common flows:
 - **National debt.** "What's the public debt right now?" → `treasury_debt` → outstanding total broken into intragovernmental vs. public-held.
 - **Customs revenue.** "How much tariff revenue did Treasury collect in 2024?" → `treasury_customs_revenue({year: 2024})`.
 - **Receipts / outlays.** Daily Treasury cash position (deposits vs. withdrawals) by source.
+- **Outlays by function.** "What were net interest outlays in FY2026?" -> `treasury_outlays({fiscal_year: 2026, function: "Net Interest"})` -> month, fiscal-year-to-date and prior-year-to-date dollars for each budget function, plus total net outlays, total receipts and the deficit (computed as outlays minus receipts and labelled as such). Every response names the statement date, the period, and the basis (net outlays, nominal dollars, fiscal year Oct-Sep). Covers fiscal years 2015 onward; earlier years, or a statement not yet released, return `found:false` with the reason rather than an empty list. Matching a published headline total: month vs fiscal-year-to-date and net-by-function vs by-agency are different bases.
 - **Exchange rates.** Treasury reporting rate for foreign-currency transactions (used by federal contractors and grant recipients).
 - **Auction results.** "What was the high yield at the last 10-year note auction?" → `treasury_auction_results({security_type: "Note", term: "10-Year"})` → high yield, bid-to-cover ratio, CUSIP, offering/accepted amounts for the most recent settled auction. Covers bills, notes, bonds, TIPS, and floating-rate notes (FRNs).
 
@@ -98,7 +99,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1819+ data sources. The
+Both URLs reach the same gateway and the same 1857+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 
@@ -112,10 +113,12 @@ curl -X POST https://gateway.pipeworx.io/v1/tools/treasury_customs_revenue \
 
 No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/treasury_customs_revenue`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.
 
-## Standalone (no gateway account)
+## Run it from npm
 
-This package also runs as a local stdio MCP server — no Pipeworx account, no
-gateway round-trip:
+`@pipeworx/mcp-treasury-fiscal` is a local stdio bridge to the Pipeworx gateway: your MCP client
+starts it with `npx`, and it forwards every call to the same
+`https://gateway.pipeworx.io/treasury-fiscal/mcp` endpoint shown above. It needs network access;
+there is no offline mode.
 
 ```json
 {
@@ -128,15 +131,18 @@ gateway round-trip:
 }
 ```
 
-Or run it directly to confirm it starts:
+Without a key it calls anonymously, capped at 50 calls a day. A free account
+raises that to 200 a day: get a key at https://pipeworx.io/signup and add
+`"env": { "PIPEWORX_API_KEY": "<your key>" }` to the server entry.
+The key is sent as a Bearer token, the same way a hosted connection sends it,
+so calls are metered and billed exactly as they are there.
 
-```bash
-npx -y @pipeworx/mcp-treasury-fiscal
-```
+It lists **only** this pack's tools by default. Set `PIPEWORX_META_TOOLS=1` to
+also list `ask_pipeworx` and the other gateway-wide tools.
 
-It speaks MCP over stdin/stdout and answers `initialize`/`tools/list`/`tools/call`
-for **only** this pack's tools — none of the shared meta-tools the gateway
-connection above adds. Same source, same tools, no ask_pipeworx routing.
+Behind an HTTPS proxy: Node's built-in `fetch` does not read `HTTPS_PROXY` by
+default. Newer Node releases honour it when `NODE_USE_ENV_PROXY=1` is set; check
+your Node version's documentation.
 
 ## Using with ask_pipeworx
 
